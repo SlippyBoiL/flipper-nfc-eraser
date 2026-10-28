@@ -1,9 +1,12 @@
 #include "nfc_eraser_app.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <furi_hal_nfc.h>
 
 #define TAG "NfcEraser"
+#define NFC_ERASER_BUILD "1.2"
 
 /** First page of user memory on every Ultralight/NTAG derivative. */
 #define NFC_ERASER_FIRST_USER_PAGE (4U)
@@ -15,6 +18,58 @@ static const uint8_t nfc_eraser_seed_keys[][ERASER_ULC_KEY_SIZE] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
     {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
 };
+
+/* ------------------------------------------------------------------------- */
+/* Crash diagnostics                                                         */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Appends one line to last_run.log and flushes it immediately. A firmware
+ * assertion halts the system (no exception handler runs in the app), so the
+ * last line in this file is the exact stage that was executing when it died.
+ */
+static void nfc_eraser_diag(NfcEraserApp* app, const char* fmt, ...) {
+    if(app->diag == NULL) return;
+
+    char line[128];
+    int used = snprintf(line, sizeof(line), "%lu ", (unsigned long)furi_get_tick());
+    if(used <= 0 || (size_t)used >= sizeof(line)) return;
+
+    va_list args;
+    va_start(args, fmt);
+    int added = vsnprintf(line + used, sizeof(line) - (size_t)used, fmt, args);
+    va_end(args);
+    if(added <= 0) return;
+
+    size_t len = strlen(line);
+    if(len + 2 > sizeof(line)) len = sizeof(line) - 2;
+    line[len++] = '\n';
+    line[len] = '\0';
+
+    storage_file_write(app->diag, line, len);
+    storage_file_sync(app->diag);
+}
+
+static void nfc_eraser_diag_open(NfcEraserApp* app) {
+    storage_common_mkdir(app->storage, NFC_ERASER_APP_DIR);
+
+    app->diag = storage_file_alloc(app->storage);
+    if(!storage_file_open(app->diag, NFC_ERASER_LOG_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_free(app->diag);
+        app->diag = NULL;
+        return;
+    }
+
+    nfc_eraser_diag(app, "=== NFC Eraser %s start ===", NFC_ERASER_BUILD);
+}
+
+static void nfc_eraser_diag_close(NfcEraserApp* app) {
+    if(app->diag == NULL) return;
+    nfc_eraser_diag(app, "exit: clean shutdown");
+    storage_file_close(app->diag);
+    storage_file_free(app->diag);
+    app->diag = NULL;
+}
 
 /* ------------------------------------------------------------------------- */
 /* Small helpers                                                             */
@@ -343,11 +398,14 @@ static void nfc_eraser_run_operation(NfcEraserApp* app, Nfc* nfc, BitBuffer* tx,
 static NfcCommand nfc_eraser_nfc_callback(NfcEvent event, void* context) {
     NfcEraserApp* app = context;
 
+    nfc_eraser_diag(app, "cb: event=%d", (int)event.type);
+
     if(event.type == NfcEventTypePollerReady) {
         BitBuffer* tx = bit_buffer_alloc(64);
         BitBuffer* rx = bit_buffer_alloc(64);
 
         nfc_eraser_run_operation(app, app->nfc, tx, rx);
+        nfc_eraser_diag(app, "cb: op done tag=%d", (int)app->tag_present);
 
         bit_buffer_free(rx);
         bit_buffer_free(tx);
@@ -432,16 +490,36 @@ static bool nfc_eraser_save_dump(NfcEraserApp* app) {
 static int32_t nfc_eraser_worker(void* context) {
     NfcEraserApp* app = context;
 
+    nfc_eraser_diag(app, "worker: start op=%d", (int)app->pending_op);
+
     if(app->pending_op == NfcEraserOpSaveDump) {
         app->worker_ok = nfc_eraser_save_dump(app);
         view_dispatcher_send_custom_event(app->view_dispatcher, NfcEraserEventWorkerDone);
         return 0;
     }
 
+    nfc_eraser_diag(app, "worker: hal probe");
+    FuriHalNfcError hal = furi_hal_nfc_is_hal_ready();
+    nfc_eraser_diag(app, "worker: hal probe=%d", (int)hal);
+    if(hal != FuriHalNfcErrorNone) {
+        snprintf(
+            app->worker_message,
+            sizeof(app->worker_message),
+            "NFC hardware not ready (%d)",
+            (int)hal);
+        app->worker_ok = false;
+        view_dispatcher_send_custom_event(app->view_dispatcher, NfcEraserEventWorkerDone);
+        return 0;
+    }
+
+    nfc_eraser_diag(app, "worker: nfc_alloc");
     Nfc* nfc = nfc_alloc();
+    nfc_eraser_diag(app, "worker: nfc_alloc ok");
     app->nfc = nfc;
 
+    nfc_eraser_diag(app, "worker: config");
     nfc_config(nfc, NfcModePoller, NfcTechIso14443a);
+    nfc_eraser_diag(app, "worker: config ok");
     nfc_set_fdt_listen_fc(nfc, 1172);
     nfc_set_fdt_poll_fc(nfc, 1172);
     nfc_set_fdt_poll_poll_us(nfc, 100);
@@ -450,12 +528,17 @@ static int32_t nfc_eraser_worker(void* context) {
      * callback. nfc_stop() asserts that the poller is running, so wait for our
      * callback to finish (it signals nfc_done) before stopping. */
     furi_event_flag_clear(app->nfc_done, 1);
+    nfc_eraser_diag(app, "worker: nfc_start");
     nfc_start(nfc, nfc_eraser_nfc_callback, app);
+    nfc_eraser_diag(app, "worker: waiting for poller");
     furi_event_flag_wait(app->nfc_done, 1, FuriFlagWaitAny, 30000);
+    nfc_eraser_diag(app, "worker: nfc_stop");
     nfc_stop(nfc);
+    nfc_eraser_diag(app, "worker: nfc_stop ok");
 
     app->nfc = NULL;
     nfc_free(nfc);
+    nfc_eraser_diag(app, "worker: nfc_free ok");
 
     view_dispatcher_send_custom_event(app->view_dispatcher, NfcEraserEventWorkerDone);
     return 0;
@@ -1042,6 +1125,9 @@ int32_t nfc_eraser_app(void* p) {
     app->gui = furi_record_open(RECORD_GUI);
     app->notifications = furi_record_open(RECORD_NOTIFICATION);
     app->storage = furi_record_open(RECORD_STORAGE);
+    nfc_eraser_diag_open(app);
+    nfc_eraser_diag(app, "boot: services open, gui=%p notif=%p storage=%p",
+                    (void*)app->gui, (void*)app->notifications, (void*)app->storage);
 
     app->text = furi_string_alloc();
     app->nfc_done = furi_event_flag_alloc();
@@ -1059,6 +1145,7 @@ int32_t nfc_eraser_app(void* p) {
         app->view_dispatcher, NfcEraserViewSubmenu, submenu_get_view(app->submenu));
     view_dispatcher_add_view(
         app->view_dispatcher, NfcEraserViewVarList, variable_item_list_get_view(app->var_list));
+    nfc_eraser_diag(app, "boot: views added");
 
     view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
     view_dispatcher_set_custom_event_callback(app->view_dispatcher, nfc_eraser_custom_event_callback);
@@ -1069,14 +1156,18 @@ int32_t nfc_eraser_app(void* p) {
     variable_item_list_set_enter_callback(app->var_list, nfc_eraser_key_select_callback, app);
 
     nfc_eraser_load_keys(app);
+    nfc_eraser_diag(app, "boot: keys=%u", (unsigned)app->key_count);
 
     app->worker =
-        furi_thread_alloc_ex("NfcEraserWorker", 4 * 1024, nfc_eraser_worker, app);
+        furi_thread_alloc_ex("NfcEraserWorker", 6 * 1024, nfc_eraser_worker, app);
+    nfc_eraser_diag(app, "boot: worker thread allocated");
 
     view_dispatcher_attach_to_gui(
         app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
     scene_manager_next_scene(app->scene_manager, NfcEraserSceneScan);
+    nfc_eraser_diag(app, "boot: scan scene entered, running dispatcher");
     view_dispatcher_run(app->view_dispatcher);
+    nfc_eraser_diag(app, "boot: dispatcher returned");
 
     /* Make sure the NFC hardware is released before tearing anything down. */
     if(app->worker_running) {
@@ -1099,6 +1190,7 @@ int32_t nfc_eraser_app(void* p) {
 
     furi_string_free(app->text);
     furi_event_flag_free(app->nfc_done);
+    nfc_eraser_diag_close(app);
 
     furi_record_close(RECORD_STORAGE);
     furi_record_close(RECORD_NOTIFICATION);
