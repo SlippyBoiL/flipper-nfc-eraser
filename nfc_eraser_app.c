@@ -343,18 +343,19 @@ static void nfc_eraser_run_operation(NfcEraserApp* app, Nfc* nfc, BitBuffer* tx,
 static NfcCommand nfc_eraser_nfc_callback(NfcEvent event, void* context) {
     NfcEraserApp* app = context;
 
-    if(event.type != NfcEventTypePollerReady) {
-        return NfcCommandStop;
+    if(event.type == NfcEventTypePollerReady) {
+        BitBuffer* tx = bit_buffer_alloc(64);
+        BitBuffer* rx = bit_buffer_alloc(64);
+
+        nfc_eraser_run_operation(app, app->nfc, tx, rx);
+
+        bit_buffer_free(rx);
+        bit_buffer_free(tx);
     }
 
-    BitBuffer* tx = bit_buffer_alloc(64);
-    BitBuffer* rx = bit_buffer_alloc(64);
-
-    nfc_eraser_run_operation(app, app->nfc, tx, rx);
-
-    bit_buffer_free(rx);
-    bit_buffer_free(tx);
-
+    /* Signals the worker that the poller is done with the radio, so it may
+     * call nfc_stop() without racing the worker thread's start-up. */
+    furi_event_flag_set(app->nfc_done, 1);
     return NfcCommandStop;
 }
 
@@ -445,9 +446,12 @@ static int32_t nfc_eraser_worker(void* context) {
     nfc_set_fdt_poll_fc(nfc, 1172);
     nfc_set_fdt_poll_poll_us(nfc, 100);
 
-    /* Runs nfc_eraser_nfc_callback() on the Nfc worker thread, blocking here
-     * until the callback returns NfcCommandStop. */
+    /* nfc_start() only launches the poller thread; it does not wait for the
+     * callback. nfc_stop() asserts that the poller is running, so wait for our
+     * callback to finish (it signals nfc_done) before stopping. */
+    furi_event_flag_clear(app->nfc_done, 1);
     nfc_start(nfc, nfc_eraser_nfc_callback, app);
+    furi_event_flag_wait(app->nfc_done, 1, FuriFlagWaitAny, 30000);
     nfc_stop(nfc);
 
     app->nfc = NULL;
@@ -1040,6 +1044,7 @@ int32_t nfc_eraser_app(void* p) {
     app->storage = furi_record_open(RECORD_STORAGE);
 
     app->text = furi_string_alloc();
+    app->nfc_done = furi_event_flag_alloc();
 
     app->view_dispatcher = view_dispatcher_alloc();
     app->scene_manager = scene_manager_alloc(&nfc_eraser_scene_handlers, app);
@@ -1093,6 +1098,7 @@ int32_t nfc_eraser_app(void* p) {
     view_dispatcher_free(app->view_dispatcher);
 
     furi_string_free(app->text);
+    furi_event_flag_free(app->nfc_done);
 
     furi_record_close(RECORD_STORAGE);
     furi_record_close(RECORD_NOTIFICATION);
