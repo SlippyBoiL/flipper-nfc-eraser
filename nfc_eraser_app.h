@@ -17,6 +17,7 @@
 #define NFC_ERASER_APP_DIR   "/ext/apps_data/nfc_eraser"
 #define NFC_ERASER_DUMP_DIR  "/ext/apps_data/nfc_eraser/dumps"
 #define NFC_ERASER_KEYS_PATH "/ext/apps_data/nfc_eraser/keys.txt"
+#define NFC_ERASER_LOG_PATH  "/ext/apps_data/nfc_eraser/last_run.log"
 
 typedef enum {
     NfcEraserViewWidget,
@@ -66,6 +67,7 @@ typedef struct {
     Gui* gui;
     NotificationApp* notifications;
     Storage* storage;
+    File* diag;
     ViewDispatcher* view_dispatcher;
     SceneManager* scene_manager;
 
