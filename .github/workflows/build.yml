@@ -1,0 +1,30 @@
+name: Build FAP
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ufbt
+        run: pip install ufbt
+
+      - name: Build FAP
+        run: ufbt
+
+      - name: Self-test 3DES core
+        run: gcc -std=c11 -Wall -Wextra -DDES3_SELFTEST -o /tmp/des3 des3.c && /tmp/des3
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nfc_eraser-fap
+          path: dist/*.fap
