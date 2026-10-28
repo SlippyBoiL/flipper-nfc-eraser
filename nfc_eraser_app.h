@@ -74,6 +74,7 @@ typedef struct {
     VariableItemList* var_list;
 
     FuriThread* worker;
+    FuriEventFlag* nfc_done;
     bool worker_running;
     volatile bool abort_requested;
     NfcEraserOp pending_op;

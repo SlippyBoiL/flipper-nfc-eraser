@@ -3,9 +3,9 @@ App(
     name="NFC Eraser",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="nfc_eraser_app",
-    requires=["gui", "storage"],
+    requires=["gui", "storage", "notification"],
     stack_size=4 * 1024,
     fap_category="NFC",
     fap_description="Wipe, dump and re-key MIFARE Ultralight / Ultralight C tags",
-    fap_version="1.0",
+    fap_version="1.1",
 )
