@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -24,7 +27,28 @@ jobs:
       - name: Self-test 3DES core
         run: gcc -std=c11 -Wall -Wextra -DDES3_SELFTEST -o /tmp/des3 des3.c && /tmp/des3
 
+      - name: Verify artifact exists
+        run: |
+          test -s dist/nfc_eraser.fap
+          ls -l dist/
+
       - uses: actions/upload-artifact@v4
         with:
           name: nfc_eraser-fap
-          path: dist/*.fap
+          path: dist/nfc_eraser.fap
+
+      # Publishes a rolling "latest" release so the .fap can be downloaded
+      # without a GitHub account and without unzipping an artifact.
+      - name: Publish release with FAP
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: NFC Eraser - latest build
+          body: |
+            Automatically built from commit ${{ github.sha }}.
+
+            Download `nfc_eraser.fap` below and copy it to `apps/NFC/` on your
+            Flipper Zero SD card, then open Applications -> NFC -> NFC Eraser.
+          files: dist/nfc_eraser.fap
+          make_latest: true
