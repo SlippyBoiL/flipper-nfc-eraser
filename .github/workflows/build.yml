@@ -37,18 +37,34 @@ jobs:
           name: nfc_eraser-fap
           path: dist/nfc_eraser.fap
 
-      # Publishes a rolling "latest" release so the .fap can be downloaded
-      # without a GitHub account and without unzipping an artifact.
-      - name: Publish release with FAP
-        if: github.event_name != 'pull_request'
+      # Rolling build for branch pushes: keeps a stable download URL.
+      - name: Publish rolling build
+        if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: NFC Eraser - latest build
+          make_latest: false
           body: |
             Automatically built from commit ${{ github.sha }}.
 
             Download `nfc_eraser.fap` below and copy it to `apps/NFC/` on your
             Flipper Zero SD card, then open Applications -> NFC -> NFC Eraser.
           files: dist/nfc_eraser.fap
+
+      # Versioned release, created by pushing a v* tag.
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: NFC Eraser ${{ github.ref_name }}
           make_latest: true
+          body: |
+            Built from ${{ github.sha }}.
+
+            Download `nfc_eraser.fap` and copy it to `apps/NFC/` on your Flipper
+            Zero SD card, then open Applications -> NFC -> NFC Eraser.
+
+            Requires official firmware 1.5.x (built against target 7, API 88.2).
+          files: dist/nfc_eraser.fap
